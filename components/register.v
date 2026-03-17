@@ -3,11 +3,14 @@
     by default, but parameterized to be usable for all sizes
 */
 
+`ifndef COMPONENTS_REGISTER_V
+`define COMPONENTS_REGISTER_V
+
 module register #(
     parameter width = 12        
 )
 ( 
-    inout           [width - 1:0]  bus,
+    inout   [width - 1:0]   bus,
     /*
         12-bit bus for transferring data in and out of the register.
     */
@@ -20,19 +23,11 @@ module register #(
     /*
         Asynchronous reset 
     */
-    `ifndef USE_CLOCK       // Only if Clock is not used
     input                   nhold_enable,
     /*
         Active high signal to enable the register, or if low, simply holds
         the current value and bus becomes high impedance.
     */
-    `endif
-    `ifdef USE_CLOCK        // This is a clocked register if USE_CLOCK is defined
-    input                   clk,
-    /*
-        Clock Signal
-    */
-    `endif
 );
 
 // Data Container Register
@@ -41,22 +36,10 @@ reg     [width - 1:0]  mem_array;
 // High Impedance (Disconnected) if in loading/write mode 
 // or module is disabled (if USE_CLOCK is not defined)
 // Otherwise, in Read Mode
-assign bus = (
-    `ifndef USE_CLOCK 
-        (nread_write & nhold_enable)
-    `endif
-    `ifdef USE_CLOCK
-        nread_write
-    `endif
-) ? (width)'bz : mem_array;
+assign bus = (nread_write & nhold_enable) ? (width)'bz : mem_array;
 
 // Real Processing Blcck
-`ifndef USE_CLOCK 
-    always
-`endif
-`ifdef USE_CLOCK
-    always@(posedge clk or negedge nreset)
-`endif 
+always
 begin
     // Conditional for Accessing the Register Write
     if (nread_write) 
@@ -67,3 +50,5 @@ begin
 end
 
 endmodule
+
+`endif

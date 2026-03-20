@@ -1,145 +1,95 @@
 /*
-    A pH module interface for the arithmetic, accumulator,
-    and display units for communicating with the controller
-    and providing methods for testbench control.
-
-    pH Application Specific Module Unit
+    pH Module Interface
+    Restored to professor's original structure.
+    Added: store_display mux for STORE7/4/9 fixed output (spec pages 8-9)
+           acc_reset for clean accumulator per measurement
+           cal_done passed to arithmetic for piecewise sensitivity
 */
 
 `ifndef PHITRFC_V
 `define PHITRFC_V
 
-// External Modules
 `include "components/arithmetic.v"
 `include "components/qsseg.v"
 
 module phitrfc(
-    input           [11:0]  adc_readout,
-        /*
-            12-bit ADC value from test bench,
-            or, if possible, at initialization,
-            a random variation is added to the
-            entire readout to facilitate the
-            need for calibration.
-
-            Like, since this does not need to
-            be synthesized, a random value
-            between 0 and ([2^12] - 1) / 5 is
-            added (positive or negative) to all
-            readouts, which a calibration test
-            would be able to do. 
-        */
-    input           [3:0]   ctrl_bus,
-        /*
-            Control sourced from the controller.
-            Decided that the controller can trigger
-            four specific actions in the interface:
-
-            ~Compute / Load (nC/LD) - A single control
-                signal for dictating whether the device
-                should load a pH readout to the memory
-                register or compute the pH from the 
-                readout.
-
-            Acidic Calibration (CBA) - Computes the
-                first-step calibration using an acidic
-                input.
-            Basic Calibration (CBB) - Computes the
-                second-step calibration using a basic
-                input.
-
-            *   When CBA and CBB are HIGH at the SAME TIME, 
-            *       the Calibration Computation is the 
-            *       Neutral Calibration, which takes as input
-            *       the neutral (pH ~7) calibration input.
-            *   When CBA and CBB are LOW at the SAME TIME,
-            *       it is not in Calibration Mode, but in
-            *       pH Calculation Mode, that can be passed
-            *       to the display.
-            
-            Display Value (DSV) - Shows the computed
-                value on the quadruple seven-segment
-                display. If this is low, then the 
-                display is off.
-
-            All signals are active HIGH, and is in the
-            following format:
-
-            MSB -> [3    2    1    0] <- LSB
-                    ^    ^    ^    ^
-                    |    |    |    |
-                    |    |    |    |
-                   DSV nC/LD CBA  CBB   
-        */
-    input                   clk
+    input  [11:0] adc_readout,
+    input  [3:0]  ctrl_bus,
+    input  [2:0]  cal_done,
+    input  [1:0]  store_display,
+    input         acc_reset,
+    input         clk
 );
 
-// Local Declarations
-reg         [3:0]       disp_data_bus;
-reg         [1:0]       display_selector = 2'b0;
+reg  [3:0] disp_data_bus;
+reg  [1:0] display_selector = 2'b0;
 
-
-wire        [11:0]      data_bus;
-wire                    dsv, nc_ld, cba, cbb;    // Wire as explained in ctrl_bus
-
-// Hard Assignments / Aliases
-assign dsv = ctrl_bus[3];
+wire dsv, nc_ld, cba, cbb;
+assign dsv   = ctrl_bus[3];
 assign nc_ld = ctrl_bus[2];
-assign cba = ctrl_bus[1];
-assign cbb = ctrl_bus[0];
+assign cba   = ctrl_bus[1];
+assign cbb   = ctrl_bus[0];
 
-// Modules
-arithmetic      arithmem_unit(data_bus, {cba, cbb}, nc_ld);
-qsseg           display(disp_data_bus, display_selector, dsv, clk);
+wire [11:0] data_bus;
+assign data_bus = nc_ld ? adc_readout : 12'bz;
 
-// Conversion from 12-bit Value to 0-14 fixed point
-reg         [23:0]      temporary_result;
-always@(nc_ld, cba, cbb)
-begin
-    if (!(nc_ld & cba & cbb))
-    begin
-        // Scale down to 0-14 fixed-point
-        temporary_result = data_bus * 1400;
-        temporary_result = temporary_result / 4095;
-    end
+arithmetic arithmem_unit (
+    .bus(data_bus), .mode({cba, cbb}),
+    .neval_load(nc_ld), .cal_done(cal_done),
+    .acc_reset(acc_reset), .clk(clk)
+);
+
+qsseg display (
+    .bus(disp_data_bus), .selector(display_selector),
+    .reset(~dsv), .write_clk(clk)
+);
+
+// Capture pH result from arithmetic when in compute mode
+reg [23:0] temporary_result;
+always @(posedge clk) begin
+    if (!nc_ld)
+        temporary_result <= data_bus;
 end
 
-// Conversion from fixed-point to bcd;
-reg         [15:0]      temporary_bcd;
-integer i, j;        // These are simulation-only tooling.
-always@(temporary_result)
-begin
-    // Initialize
-    temporary_bcd = 16'h0;                              // initialize with zeros
-    temporary_bcd[11:0] = temporary_result[11:0];       // initialize with input vector, 11:0 is the 
-                                                        // scaled down after division, this should be
-                                                        // fixedpoint ab.cd at this.
-
-    for(i = 0; i <= 7; i = i + 1)                       // iterate on structure depth
-    begin
-        for(j = 0; j <= (i / 3); j = j + 1)             // iterate on structure width
-        begin
-            if (temporary_bcd[11 - i + 4 * j -:4] > 4)  // if > 4
-            begin
-                temporary_bcd[11-i+4*j -:4] = temporary_bcd[11 - i + 4 * j -: 4] + 4'd3; 
-                                                        // add 3
-            end
-        end
-    end
+// Mux: STORE states show fixed calibration pH, otherwise computed pH
+reg [23:0] display_value;
+always @(*) begin
+    case (store_display)
+        2'b01:   display_value = 24'd686;  // STORE7: show pH 6.86
+        2'b10:   display_value = 24'd400;  // STORE4: show pH 4.00
+        2'b11:   display_value = 24'd918;  // STORE9: show pH 9.18
+        default: display_value = temporary_result;
+    endcase
 end
 
+// Double-Dabble BCD on display_value
+reg  [27:0] bcd_shift;
+integer     i;
+reg  [15:0] temporary_bcd;
 
-// Display Connections
-wire        [3:0]       d_tens, d_ones, d_tenths, d_hundredths;
+always @(display_value) begin
+    bcd_shift        = 28'b0;
+    bcd_shift[10:0]  = display_value[10:0];
+    for (i = 0; i < 11; i = i + 1) begin
+        if (bcd_shift[14:11] > 4) bcd_shift[14:11] = bcd_shift[14:11] + 3;
+        if (bcd_shift[18:15] > 4) bcd_shift[18:15] = bcd_shift[18:15] + 3;
+        if (bcd_shift[22:19] > 4) bcd_shift[22:19] = bcd_shift[22:19] + 3;
+        if (bcd_shift[26:23] > 4) bcd_shift[26:23] = bcd_shift[26:23] + 3;
+        bcd_shift = bcd_shift << 1;
+    end
+    temporary_bcd[15:12] = bcd_shift[26:23]; // thousands (tens of pH)
+    temporary_bcd[11:8]  = bcd_shift[22:19]; // hundreds  (ones of pH)
+    temporary_bcd[7:4]   = bcd_shift[18:15]; // tens      (tenths)
+    temporary_bcd[3:0]   = bcd_shift[14:11]; // ones      (hundredths)
+end
 
-assign d_tens = temporary_bcd[15:12];
-assign d_ones = temporary_bcd[11:8];
-assign d_tenths = temporary_bcd[7:4];
-assign d_hundredths = temporary_bcd[3:0];
+wire [3:0] d_tens, d_ones, d_tenths, d_hundredths;
+assign d_tens        = temporary_bcd[15:12];
+assign d_ones        = temporary_bcd[11:8];
+assign d_tenths      = temporary_bcd[7:4];
+assign d_hundredths  = temporary_bcd[3:0];
 
-always@(negedge clk)
-begin
-
+always @(negedge clk) begin
     display_selector = display_selector + 1;
     case (display_selector)
         2'h0: disp_data_bus = d_hundredths;
@@ -150,5 +100,4 @@ begin
 end
 
 endmodule
-
 `endif
